@@ -1,104 +1,295 @@
 import hashlib
 import json
 import uuid
+import subprocess
 import boto3
-import requests
 import urllib3
 
-# Suppress InsecureRequestWarning caused by corporate VPN/proxy inspection
+# Suppress SSL warnings because corporate Zscaler/VPN
+# is intercepting HTTPS traffic.
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# ---------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------
+
+# =========================================================
+# CONFIGURATION
+# =========================================================
+
 REGION = "us-east-2"
-API_ID = "ojoad8fhwj"
-STAGE_NAME = "poc"  # Replace if your deployed stage name is different (e.g., prod, dev)
-BUCKET_NAME = "lmig-grs-dev-diai-poc-data-lake-reports-833390816381"
+
+# Use the API ID that you successfully tested with curl
+API_ID = "m0jqz3uzp9"
+
+STAGE_NAME = "poc"
+
 S3_PREFIX = "reports"
 
-API_URL = f"https://{API_ID}.execute-api.{REGION}.amazonaws.com/{STAGE_NAME}/{S3_PREFIX}"
+BUCKET_NAME = "lmig-grs-dev-diai-poc-data-lake-reports-833390816381"
+
+API_URL = (
+    f"https://{API_ID}.execute-api.{REGION}.amazonaws.com"
+    f"/{STAGE_NAME}/{S3_PREFIX}"
+)
 
 
-def compute_sha256(data_bytes: bytes) -> str:
-    """Computes SHA-256 hash to detect bit-level data loss or modification."""
+# =========================================================
+# SHA-256
+# =========================================================
+
+def compute_sha256(data_bytes):
     return hashlib.sha256(data_bytes).hexdigest()
 
 
-def run_pipeline_test():
-    filename = f"report-{uuid.uuid4().hex[:8]}.json"
-    upload_url = f"{API_URL}/{filename}"
+# =========================================================
+# UPLOAD TO API GATEWAY USING CURL
+# =========================================================
 
-    # 1. Generate sample payload
-    payload_data = {
-        "reportId": str(uuid.uuid4()),
-        "status": "PROCESSED",
-        "metrics": {
-            "records": 50000,
-            "errorCount": 0,
-            "latencyMs": 142.8
-        },
-        "description": "POC data validation for direct API Gateway to S3 streaming."
-    }
-    raw_bytes = json.dumps(payload_data, separators=(",", ":")).encode("utf-8")
-    sent_hash = compute_sha256(raw_bytes)
-    sent_size = len(raw_bytes)
+def upload_to_api_gateway(upload_url, raw_bytes):
 
-    print(f"[*] Preparing test payload: {filename} ({sent_size} bytes)")
-    print(f"[*] Sent Payload SHA-256: {sent_hash}")
+    print("\n[*] Uploading file to API Gateway...")
+    print(f"[*] URL: {upload_url}")
 
-    # 2. Push Data to API Gateway (PUT)
-    headers = {"Content-Type": "application/json"}
-    print(f"[*] Uploading to API Gateway: {upload_url}")
-    
+    curl_command = [
+        "curl.exe",
+        "-k",
+        "-sS",
+        "-X",
+        "PUT",
+        upload_url,
+        "-H",
+        "Content-Type: application/json",
+        "--data-binary",
+        "@-"
+    ]
+
     try:
-        # verify=False prevents the corporate VPN/Zscaler SSL handshake termination
-        response = requests.put(
-            upload_url, 
-            data=raw_bytes, 
-            headers=headers, 
-            verify=False, 
-            timeout=30
+
+        result = subprocess.run(
+            curl_command,
+            input=raw_bytes,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=60
         )
-    except requests.exceptions.RequestException as e:
-        print(f"[!] Network/HTTPS Request Failed: {e}")
-        return
 
-    print(f"[*] API Gateway Response: HTTP {response.status_code}")
-    if response.status_code not in (200, 201):
-        print(f"[!] Upload Failed: {response.text}")
-        return
+        response_body = result.stdout.decode(
+            "utf-8",
+            errors="replace"
+        )
 
-    # 3. Retrieve directly from S3 to verify persistence and integrity
+        error_output = result.stderr.decode(
+            "utf-8",
+            errors="replace"
+        )
+
+        print(f"[*] curl return code: {result.returncode}")
+
+        if error_output:
+            print(f"[*] curl message: {error_output}")
+
+        if result.returncode != 0:
+
+            print("\n[!] API Gateway upload failed.")
+            print(f"[!] curl error: {error_output}")
+
+            return False
+
+        print("[+] API Gateway upload completed.")
+        print(f"[*] API response: {response_body}")
+
+        return True
+
+    except subprocess.TimeoutExpired:
+
+        print("[!] API Gateway request timed out.")
+
+        return False
+
+    except Exception as e:
+
+        print(f"[!] API Gateway error: {e}")
+
+        return False
+
+
+# =========================================================
+# VERIFY OBJECT IN S3
+# =========================================================
+
+def verify_s3_object(filename, sent_size, sent_hash):
+
     s3_key = f"{S3_PREFIX}/{filename}"
-    print(f"[*] Fetching uploaded file directly from s3://{BUCKET_NAME}/{s3_key}...")
 
-    s3_client = boto3.client("s3", region_name=REGION)
+    print("\n[*] Checking S3 object...")
+    print(f"[*] Bucket: {BUCKET_NAME}")
+    print(f"[*] Key: {s3_key}")
+
     try:
-        s3_obj = s3_client.get_object(Bucket=BUCKET_NAME, Key=s3_key)
+
+        # verify=False is required temporarily because
+        # corporate Zscaler SSL certificate is not trusted
+        # by Python/boto3 on this machine.
+        s3_client = boto3.client(
+            "s3",
+            region_name=REGION,
+            verify=False
+        )
+
+        # First check that the object exists
+        s3_obj = s3_client.get_object(
+            Bucket=BUCKET_NAME,
+            Key=s3_key
+        )
+
         downloaded_bytes = s3_obj["Body"].read()
-        received_hash = compute_sha256(downloaded_bytes)
+
         received_size = len(downloaded_bytes)
 
-        # 4. Check for Data Loss / Truncation
-        print(f"[*] Received S3 Payload Size: {received_size} bytes")
-        print(f"[*] Received S3 SHA-256:     {received_hash}")
+        received_hash = compute_sha256(
+            downloaded_bytes
+        )
+
+        print("\n[*] S3 verification results")
+        print("---------------------------------------")
+        print(f"[*] Sent size      : {sent_size} bytes")
+        print(f"[*] Received size  : {received_size} bytes")
+        print(f"[*] Sent SHA-256   : {sent_hash}")
+        print(f"[*] S3 SHA-256     : {received_hash}")
+        print("---------------------------------------")
 
         size_match = sent_size == received_size
+
         hash_match = sent_hash == received_hash
 
         if size_match and hash_match:
-            print("\n SUCCESS: Zero data loss detected! Payloads match bit-for-bit.")
-        else:
-            print("\n INTEGRITY FAILURE: Data loss or corruption occurred.")
-            if not size_match:
-                print(f"    - Size mismatch: sent {sent_size} vs received {received_size}")
-            if not hash_match:
-                print("    - Checksum mismatch between original and S3 object.")
+
+            print("\n=======================================")
+            print(" SUCCESS: ZERO DATA LOSS")
+            print("=======================================")
+            print("Payload matches S3 bit-for-bit.")
+
+            return True
+
+        print("\n=======================================")
+        print(" INTEGRITY FAILURE")
+        print("=======================================")
+
+        if not size_match:
+
+            print(
+                f"[!] Size mismatch: "
+                f"{sent_size} vs {received_size}"
+            )
+
+        if not hash_match:
+
+            print("[!] SHA-256 checksum mismatch.")
+
+        return False
 
     except Exception as e:
-        print(f"[!] Error verifying S3 object: {str(e)}")
+
+        print("\n[!] S3 verification failed.")
+        print(f"[!] Error: {e}")
+
+        return False
 
 
-if __name__ == "__main__":
+# =========================================================
+# MAIN PIPELINE TEST
+# =========================================================
+
+def run_pipeline_test():
+
+    print("\n=======================================")
+    print(" API GATEWAY -> S3 INGESTION TEST")
+    print("=======================================")
+
+    # -----------------------------------------------------
+    # Generate unique filename
+    # -----------------------------------------------------
+
+    filename = (
+        f"report-{uuid.uuid4().hex[:8]}.json"
+    )
+
+    upload_url = (
+        f"{API_URL}/{filename}"
+    )
+
+    # -----------------------------------------------------
+    # Create test payload
+    # -----------------------------------------------------
+
+    payload_data = {
+
+        "reportId": str(uuid.uuid4()),
+
+        "status": "PROCESSED",
+
+        "metrics": {
+
+            "records": 50000,
+
+            "errorCount": 0,
+
+            "latencyMs": 142.8
+        },
+
+        "description":
+            "POC data validation for direct "
+            "API Gateway to S3 streaming."
+    }
+
+    raw_bytes = json.dumps(
+        payload_data,
+        separators=(",", ":")
+    ).encode("utf-8")
+
+    sent_size = len(raw_bytes)
+
+    sent_hash = compute_sha256(
+        raw_bytes
+    )
+
+    print("\n[*] Test file:")
+    print(f"    {filename}")
+
+    print("\n[*] Payload size:")
+    print(f"    {sent_size} bytes")
+
+    print("\n[*] Payload SHA-256:")
+    print(f"    {sent_hash}")
+
+    # -----------------------------------------------------
+    # Upload using curl
+    # -----------------------------------------------------
+
+    upload_success = upload_to_api_gateway(
+        upload_url,
+        raw_bytes
+    )
+
+    if not upload_success:
+
+        print("\n[!] Stopping pipeline test.")
+
+        return
+
+    # -----------------------------------------------------
+    # Verify directly from S3
+    # -----------------------------------------------------
+
+    verify_s3_object(
+        filename,
+        sent_size,
+        sent_hash
+    )
+
+
+# =========================================================
+# PROGRAM ENTRY
+# =========================================================
+
+if _name_ == "_main_":
+
     run_pipeline_test()
