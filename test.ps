@@ -1,0 +1,44 @@
+# --- 1. Set Variables ---
+$ApiId     = "YOUR_API_ID"            # e.g., a1b2c3d4e5
+$Region    = "ap-south-1"             # Your AWS Region
+$Stage     = "prod"                   # Your deployed Stage name
+$Bucket    = "your-s3-bucket-name"    # Target bucket name
+$FileName  = "test-upload.txt"        # Target S3 object key
+$ApiKey    = ""                       # Add API Key string if enabled, else leave empty
+
+# Build Endpoint URL (adjust the path if your resource pattern is /{item} or /{bucket}/{item})
+$EndpointUrl = "https://$ApiId.execute-api.$Region.amazonaws.com/$Stage/$Bucket/$FileName"
+
+# --- 2. Build Payload & Headers ---
+$Payload = "Hello from PowerShell to S3 via API Gateway at $(Get-Date)"
+
+$Headers = @{
+    "Content-Type" = "text/plain"
+}
+
+if ($ApiKey -ne "") {
+    $Headers["x-api-key"] = $ApiKey
+}
+
+# --- 3. Execute PUT Request ---
+try {
+    Write-Host "Sending PUT request to: $EndpointUrl" -ForegroundColor Cyan
+    
+    $Response = Invoke-RestMethod -Uri $EndpointUrl `
+                                  -Method Put `
+                                  -Body $Payload `
+                                  -Headers $Headers `
+                                  -TimeoutSec 30
+    
+    Write-Host "Success! Response:" -ForegroundColor Green
+    $Response | Format-List
+}
+catch {
+    Write-Host "Request Failed!" -ForegroundColor Red
+    Write-Host "Status Code: " $_.Exception.Response.StatusCode.value__
+    
+    # Read detailed response body returned from API Gateway/S3
+    $Reader = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream())
+    $ErrorDetails = $Reader.ReadToEnd()
+    Write-Host "Error Details: $ErrorDetails" -ForegroundColor Yellow
+}
