@@ -1,0 +1,19 @@
+Refactor this Python verification script to test an Amazon API Gateway direct S3 ingestion endpoint that has been switched from an HTTP PUT to an HTTP POST method. 
+
+Analyze the current file and apply the following updates while preserving the existing SHA-256 byte-integrity verification logic:
+
+1. Method Change:
+   - Update the network request from `requests.put(...)` to `requests.post(...)`.
+   - Update log statements and headers to reflect the POST workflow.
+
+2. Endpoint & S3 Key Resolution:
+   - The API Gateway endpoint now accepts direct POST requests at the collection level (without passing an object key in the URL path).
+   - In API Gateway, the object key is dynamically assigned using `$context.requestId`.
+   - Update the script to extract the request identifier from the HTTP response headers (inspect `response.headers.get("x-amzn-requestid")` or `response.headers.get("apigw-requestid")`).
+   - Use that extracted ID as the S3 object key to fetch the object directly from S3 via Boto3.
+
+3. Integrity & Error Handling:
+   - Handle cases where the request ID header might be missing or the status code is not 200/201.
+   - Retain the exact SHA-256 checksum and payload byte-length equality checks to verify zero data loss and detect truncation.
+
+Output the entire modified script cleanly with clear comments on what changed.
