@@ -1,19 +1,36 @@
-Refactor this Python verification script to test an Amazon API Gateway direct S3 ingestion endpoint that has been switched from an HTTP PUT to an HTTP POST method. 
+Act as a Senior Python and AWS Data Platform Engineer. Refactor this active Python verification script to match our updated Amazon API Gateway direct S3 ingestion setup.
 
-Analyze the current file and apply the following updates while preserving the existing SHA-256 byte-integrity verification logic:
+Apply these specific requirements and architectural fixes:
 
-1. Method Change:
-   - Update the network request from `requests.put(...)` to `requests.post(...)`.
-   - Update log statements and headers to reflect the POST workflow.
+1. Configuration & URL Setup:
+   - Ensure the script has configurable constants at the top:
+     REGION = "<YOUR_REGION>"
+     API_ID = "<YOUR_API_ID>"
+     STAGE_NAME = "<YOUR_STAGE_NAME>"
+     RESOURCE_PATH = "venti-event"   # The API Gateway resource path
+     BUCKET_NAME = "<YOUR_BUCKET_NAME>"
+     S3_PREFIX = "reports/venti-event" # Target S3 folder matching API Gateway Path Override
+   - Construct API_URL strictly as:
+     API_URL = f"https://{API_ID}.execute-api.{REGION}.amazonaws.com/{STAGE_NAME}/{RESOURCE_PATH}"
+   - Do NOT append any filename or UUID to API_URL (the client sends POST directly to the collection endpoint).
 
-2. Endpoint & S3 Key Resolution:
-   - The API Gateway endpoint now accepts direct POST requests at the collection level (without passing an object key in the URL path).
-   - In API Gateway, the object key is dynamically assigned using `$context.requestId`.
-   - Update the script to extract the request identifier from the HTTP response headers (inspect `response.headers.get("x-amzn-requestid")` or `response.headers.get("apigw-requestid")`).
-   - Use that extracted ID as the S3 object key to fetch the object directly from S3 via Boto3.
+2. Network Request (POST):
+   - Switch the HTTP call from requests.put(...) to:
+     response = requests.post(API_URL, data=raw_bytes, headers={"Content-Type": "application/json"})
+   - Check response status: if response.status_code not in (200, 201), print the exact response.status_code, response.text, and response.headers for immediate debugging, then terminate cleanly.
 
-3. Integrity & Error Handling:
-   - Handle cases where the request ID header might be missing or the status code is not 200/201.
-   - Retain the exact SHA-256 checksum and payload byte-length equality checks to verify zero data loss and detect truncation.
+3. Dynamic S3 Key Resolution:
+   - In direct S3 POST integrations, API Gateway generates the filename using its internal request ID.
+   - Extract the request ID from the HTTP response headers using a case-insensitive check:
+     request_id = response.headers.get("x-amzn-requestid") or response.headers.get("x-amz-request-id") or response.headers.get("apigw-requestid")
+   - If no request ID header is found in response.headers, print all returned headers and exit gracefully.
+   - Construct the exact S3 key as:
+     s3_key = f"{S3_PREFIX}/{request_id}"
 
-Output the entire modified script cleanly with clear comments on what changed.
+4. Verification & Zero Data Loss Check:
+   - Use boto3.client("s3", region_name=REGION).get_object(Bucket=BUCKET_NAME, Key=s3_key) to retrieve the uploaded object.
+   - Read downloaded_bytes = s3_obj["Body"].read().
+   - Compare sent_size == len(downloaded_bytes) and sent_hash == hashlib.sha256(downloaded_bytes).hexdigest().
+   - Print clear SUCCESS or INTEGRITY FAILURE banners.
+
+Output the entire, ready-to-run script with comments explaining where the user must supply their updated bucket, API ID, stage, and prefix values.
